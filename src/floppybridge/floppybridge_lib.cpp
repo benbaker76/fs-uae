@@ -55,11 +55,11 @@ struct FloppyBridgeProfileInformationDLL {
 };
 
 #ifdef _WIN32
-#include <Windows.h>
+#include <windows.h>
 #ifdef WINUAE
 HMODULE WIN32_LoadLibrary(const TCHAR*);
 #endif
-#define CALLING_CONVENSION _cdecl
+#define CALLING_CONVENSION __cdecl
 #define GETFUNC GetProcAddress
 #else
 #define CALLING_CONVENSION
