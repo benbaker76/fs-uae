@@ -388,7 +388,7 @@ void fsemu_video_post_frame(fsemu_video_frame_t *frame)
 
         int from = MAX(last_skipped_frame, fsemu_video.last_retrieved_frame + 1);
         for (int i = from; i < frame->number; i++) {
-            printf("SKIPPED FRAME %d\n", i);
+            // printf("SKIPPED FRAME %d\n", i);  // noisy under slow rendering (WSLg)
             last_skipped_frame = i;
             FSEMU_FRAMEINFO(i).render_skipped = true;
         }
