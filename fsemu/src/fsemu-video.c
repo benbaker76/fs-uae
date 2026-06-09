@@ -375,7 +375,12 @@ void fsemu_video_post_frame(fsemu_video_frame_t *frame)
         }
         GList *item = g_list_last(keep);
         while (item) {
-            g_async_queue_push_front_unlocked(fsemu_video_frame_queue, f);
+            // Push the KEPT frame, not `f`. After the try_pop loop above, `f`
+            // is NULL (that's the loop's exit condition), so pushing it tripped
+            // GLib's `g_async_queue_push_front_unlocked: 'item != NULL'` on
+            // every skipped frame — a constant CRITICAL-log flood under slow
+            // rendering (e.g. WSLg). item->data is the frame we appended above.
+            g_async_queue_push_front_unlocked(fsemu_video_frame_queue, item->data);
             item = item->prev;
         }
         g_list_free(keep);
