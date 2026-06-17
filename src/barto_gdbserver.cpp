@@ -461,6 +461,28 @@ namespace barto_gdbserver {
 		return ret;
 	}
 
+	// Inverse of get_register — value arrives in target (68k big-endian) order,
+	// i.e. the same MSB-first hex hex32() emits, so strtoul recovers it directly.
+	static void set_register(int reg, uint32_t value) {
+		switch(reg) {
+		case SR:
+			regs.sr = value;
+			MakeFromSR();
+			break;
+		case PC:
+			m68k_setpc(value);
+			break;
+		case D0: case D1: case D2: case D3: case D4: case D5: case D6: case D7:
+			m68k_dreg(regs, reg - D0) = value;
+			break;
+		case A0: case A1: case A2: case A3: case A4: case A5: case A6: case A7:
+			m68k_areg(regs, reg - A0) = value;
+			break;
+		default:
+			break;
+		}
+	}
+
 	void print_breakpoints() {
 		barto_log("GDBSERVER: Breakpoints:\n");
 		for(auto& bpn : bpnodes) {
@@ -929,6 +951,48 @@ namespace barto_gdbserver {
 											adr++;
 										}
 										response += mem;
+									} else
+										response += "E01";
+								} else if(request[0] == 'M') { // write memory: M addr,len:hexbytes
+									auto comma = request.find(',');
+									auto colon = request.find(':');
+									if(comma != std::string::npos && colon != std::string::npos) {
+										uaecptr adr = strtoul(request.data() + strlen("M"), nullptr, 16);
+										int len = strtoul(request.data() + comma + 1, nullptr, 16);
+										std::string data = from_hex(request.substr(colon + 1));
+										bool ok = true;
+										barto_log("GDBSERVER: write 0x%x bytes at 0x%x\n", len, adr);
+										for(int i = 0; i < len && i < (int)data.size(); i++) {
+											if(debug_safe_addr(adr, 1)) {
+												addrbank* ad = &get_mem_bank(adr);
+												ad->bput(adr, (uae_u8)(unsigned char)data[i]);
+											} else {
+												barto_log("GDBSERVER: error writing memory at 0x%x\n", adr);
+												ok = false;
+												break;
+											}
+											adr++;
+										}
+										response += ok ? "OK" : "E01";
+									} else
+										response += "E01";
+								} else if(request[0] == 'P') { // write one register: Pn=value
+									auto eq = request.find('=');
+									if(eq != std::string::npos) {
+										int reg = strtoul(request.data() + strlen("P"), nullptr, 16);
+										uint32_t value = strtoul(request.data() + eq + 1, nullptr, 16);
+										set_register(reg, value);
+										response += "OK";
+									} else
+										response += "E01";
+								} else if(request[0] == 'G') { // write all registers
+									std::string regdata = request.substr(strlen("G"));
+									if(regdata.length() >= 18 * 8) {
+										for(int reg = 0; reg < 18; reg++) {
+											uint32_t value = strtoul(regdata.substr(reg * 8, 8).c_str(), nullptr, 16);
+											set_register(reg, value);
+										}
+										response += "OK";
 									} else
 										response += "E01";
 								}
