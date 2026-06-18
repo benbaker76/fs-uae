@@ -109,23 +109,6 @@ namespace barto_gdbserver {
 	int time_out;
 	char *debugging_trigger;
 
-	// --- Software breakpoints written as ILLEGAL (0x4AFC) opcodes ---------------
-	// In addition to the bpnodes[] PC-compare scan (which only catches resumes
-	// from inside debug()), we write a real trap opcode into Amiga memory so a
-	// return/jump to ANY address traps deterministically. This is what makes gdb
-	// inferior function calls work: gdb sets a Z0 at the call-dummy return address
-	// (the ELF entry point), and when the called function rts-returns there the
-	// 0x4AFC raises an Illegal-instruction exception that we report as swbreak.
-	// We shadow these in the 'm' (read memory) handler so gdb still sees the
-	// original instruction bytes (otherwise gdb reports a memory mismatch).
-	static constexpr uae_u16 ILLEGAL_OPCODE = 0x4afc;
-	struct written_breakpoint {
-		uaecptr addr;       // address where the opcode was written
-		uae_u16 orig_word;  // original 16-bit word that was there
-		bool in_use;
-	};
-	static written_breakpoint written_breakpoints[BREAKPOINT_TOTAL]{};
-
 	static bool in_handle_packet = false;
 	struct tracker {
 		tracker() { backup = in_handle_packet; in_handle_packet = true; }
@@ -201,70 +184,6 @@ namespace barto_gdbserver {
 			ret += hex[v & 0xf];
 		}
 		return ret;
-	}
-
-	// --- written-breakpoint (ILLEGAL opcode) helpers --------------------------
-	// After patching an opcode under the emulated CPU we must invalidate its
-	// instruction cache so a re-fetch of that address sees the new opcode. The
-	// prefetch *pipe* (regs.irc/regs.prefetch020[]) is rebuilt from the current
-	// PC in set_register(PC) (fill_prefetch), which gdb sets before resuming.
-	static void invalidate_cpu_instruction_state() {
-		flush_cpu_caches(true);     // clear caches020[] instruction cache
-		regs.prefetch020addr = 0xffffffff;
-		regs.cacheholdingaddr020 = 0xffffffff;
-	}
-
-	// Find the slot whose written opcode covers byte address 'adr', or nullptr.
-	static written_breakpoint* find_written_breakpoint_at_byte(uaecptr adr) {
-		for(auto& wb : written_breakpoints) {
-			if(wb.in_use && adr >= wb.addr && adr < wb.addr + 2)
-				return &wb;
-		}
-		return nullptr;
-	}
-
-	// Write the ILLEGAL trap opcode at 'adr', saving the original word so it can
-	// be restored later and shadowed in 'm' reads. Returns true on success.
-	static bool install_written_breakpoint(uaecptr adr) {
-		// already installed?
-		for(auto& wb : written_breakpoints) {
-			if(wb.in_use && wb.addr == adr)
-				return true;
-		}
-		if(!debug_safe_addr(adr, 2))
-			return false;
-		for(auto& wb : written_breakpoints) {
-			if(wb.in_use)
-				continue;
-			addrbank* ad = &get_mem_bank(adr);
-			wb.orig_word = (uae_u16)ad->wget(adr);
-			ad->wput(adr, ILLEGAL_OPCODE);
-			wb.addr = adr;
-			wb.in_use = true;
-			invalidate_cpu_instruction_state();
-			barto_log("GDBSERVER: wrote ILLEGAL swbreak at 0x%x (orig 0x%04x)\n", adr, wb.orig_word);
-			return true;
-		}
-		barto_log("GDBSERVER: no free written-breakpoint slot for 0x%x\n", adr);
-		return false;
-	}
-
-	// Restore the original word at 'adr' and free the slot.
-	static void remove_written_breakpoint(uaecptr adr) {
-		for(auto& wb : written_breakpoints) {
-			if(wb.in_use && wb.addr == adr) {
-				if(debug_safe_addr(adr, 2)) {
-					addrbank* ad = &get_mem_bank(adr);
-					ad->wput(adr, wb.orig_word);
-					invalidate_cpu_instruction_state();
-				}
-				barto_log("GDBSERVER: removed ILLEGAL swbreak at 0x%x (restored 0x%04x)\n", adr, wb.orig_word);
-				wb.in_use = false;
-				wb.addr = 0;
-				wb.orig_word = 0;
-				return;
-			}
-		}
 	}
 
 /*	#pragma comment(lib, "Bcrypt.lib")
@@ -556,10 +475,12 @@ namespace barto_gdbserver {
 			// cycle-exact 68020 the instruction stream is fetched via the prefetch
 			// pipe/i-cache (regs.irc/regs.prefetch020[]/caches020), NOT directly
 			// from regs.pc_p. Without this, a gdb-set PC (e.g. an inferior function
-			// call) resumes executing the STALE prefetched opcode from where we
-			// stopped — which after our Z0 patch is the ILLEGAL (0x4afc) we wrote at
-			// the previous breakpoint, faulting at the new PC. fill_prefetch() is a
-			// no-op unless cpu_compatible (and bails when JIT/cachesize is on).
+			// call, which sets PC to the callee entry) resumes by executing the
+			// STALE prefetched opcode from wherever we last stopped instead of the
+			// instruction at the new PC — so the call jumps to the wrong place and
+			// eventually faults. This is the actual fix that makes gdb inferior
+			// function calls work. fill_prefetch() is a no-op unless cpu_compatible
+			// (and bails when JIT/cachesize is on).
 			fill_prefetch();
 			break;
 		case D0: case D1: case D2: case D3: case D4: case D5: case D6: case D7:
@@ -919,11 +840,6 @@ namespace barto_gdbserver {
 												break;
 											}
 											// TODO: error when too many breakpoints!
-											// ADDITIVE: also write a real ILLEGAL trap opcode so a
-											// return/jump to this address traps deterministically even
-											// when the bpnodes[] PC-compare scan doesn't run (e.g. the
-											// synthesized call-dummy return for gdb inferior calls).
-											install_written_breakpoint(adr);
 										}
 									} else
 										response += "E01";
@@ -944,8 +860,6 @@ namespace barto_gdbserver {
 												}
 											}
 											// TODO: error when breakpoint not found
-											// ADDITIVE: restore the original opcode we wrote in Z0.
-											remove_written_breakpoint(adr);
 										}
 									} else
 										response += "E01";
@@ -1035,13 +949,6 @@ namespace barto_gdbserver {
 														data = custom_data[idx];
 													}
 												}
-											}
-
-											// ADDITIVE: shadow written ILLEGAL breakpoints so gdb sees the
-											// original instruction bytes (otherwise it reports a memory
-											// mismatch and refuses to insert/verify the breakpoint).
-											if(written_breakpoint* wb = find_written_breakpoint_at_byte(adr)) {
-												data = (adr == wb->addr) ? (wb->orig_word >> 8) : (wb->orig_word & 0xff);
 											}
 
 											if(data == -1) {
@@ -1567,24 +1474,10 @@ start_profile:
 						regs.pc = regs.instruction_pc_user_exception; // don't know size of opcode that caused exception
 						m68k_areg(regs, A7 - A0) = regs.usp;
 					} else if(pc == IllegalError) {
-						// ADDITIVE: if the ILLEGAL was one of OUR written software
-						// breakpoints (e.g. the call-dummy return address for a gdb
-						// inferior function call), report it as a normal swbreak so gdb
-						// recognises the hit, reads the return value and restores state —
-						// instead of treating it as a fatal illegal-instruction (SIGILL).
-						uaecptr exc_pc = regs.instruction_pc_user_exception;
-						if(find_written_breakpoint_at_byte(exc_pc)) {
-							response = "T05swbreak:;";
-							// Point PC at the breakpoint address (the call-dummy return /
-							// the original instruction location) and restore the user stack.
-							regs.pc = exc_pc;
-							m68k_areg(regs, A7 - A0) = regs.usp;
-						} else {
-							response = "S04"; // illegal instruction -> SIGILL
-							// unwind PC & stack for better debugging experience (otherwise we're probably just somewhere in Kickstart)
-							regs.pc = regs.instruction_pc_user_exception; // don't know size of opcode that caused exception
-							m68k_areg(regs, A7 - A0) = regs.usp;
-						}
+						response = "S04"; // illegal instruction -> SIGILL
+						// unwind PC & stack for better debugging experience (otherwise we're probably just somewhere in Kickstart)
+						regs.pc = regs.instruction_pc_user_exception; // don't know size of opcode that caused exception
+						m68k_areg(regs, A7 - A0) = regs.usp;
 					} else {
 						response = "T05swbreak:;";
 					}
