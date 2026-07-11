@@ -31,6 +31,7 @@
 #include "fsemu-log.h"
 #include "fsemu-action.h"
 #include "fsemu-video.h"
+#include "fsemu-screenshot.h"
 #include "fs/conf.h"
 
 #define OPTION_REMOTE_DEBUGGER_START_TIMER "remote_debugger"
@@ -722,6 +723,17 @@ namespace barto_gdbserver {
 									} else if(cmd == "reset" && debugging_trigger) {
 										savestate_quick(1, 0); // restore state saved at process entry
 										barto_debug_resources_count = 0;
+										response += "OK";
+									} else if(cmd == "screenshot") {
+										// "monitor screenshot" — schedule a capture of the current
+										// (halted) frame. fsemu_screenshot_capture() sets a flag the
+										// video thread picks up on the next render and writes a PNG to
+										// the screenshots dir. While the CPU is halted for gdb the
+										// video thread still re-renders the last emulated frame, so
+										// this captures the frozen game screen. Added for the SWOS gdb
+										// harness so it can grab the fully-composited AGA frame
+										// (including hardware sprites, which a bitplane read misses).
+										fsemu_screenshot_capture();
 										response += "OK";
 									} else {
 										// unknown monitor command
