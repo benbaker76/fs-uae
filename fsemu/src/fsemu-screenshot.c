@@ -1,6 +1,8 @@
 #define FSEMU_INTERNAL
 #include "fsemu-screenshot.h"
 
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include "fsemu-application.h"
@@ -24,6 +26,17 @@ static struct {
     char *time_str;
     int last_counter;
     fsemu_mutex_t *mutex;
+    // Snapshot of the last composited frame, for synchronous capture while the
+    // CPU is halted for gdb (the video thread posts no new frames then).
+    uint8_t *snap_buffer;
+    size_t snap_size;
+    int snap_width;
+    int snap_height;
+    int snap_depth;
+    int snap_stride;
+    // Suppress the "Screenshot captured" HUD overlay for the next capture
+    // (set by the synchronous harness capture, which must not pollute frames).
+    bool no_hud;
 } fsemu_screenshot;
 
 static void fsemu_screenshot_lock(void)
@@ -277,19 +290,88 @@ void fsemu_screenshot_capture_video_frame(fsemu_video_frame_t *frame)
     SDL_FreeSurface(src);
     SDL_FreeSurface(dst);
 
-    char buffer[32];
-    g_snprintf(buffer,
-               32,
-               "%s_%02d",
-               fsemu_screenshot.time_str,
-               fsemu_screenshot.last_counter);
-    fsemu_hud_notify(
-        FSEMU_HUD_ID("SSHOTTED"), "camera", "Screenshot captured", buffer);
+    if (!fsemu_screenshot.no_hud) {
+        char buffer[32];
+        g_snprintf(buffer,
+                   32,
+                   "%s_%02d",
+                   fsemu_screenshot.time_str,
+                   fsemu_screenshot.last_counter);
+        fsemu_hud_notify(
+            FSEMU_HUD_ID("SSHOTTED"), "camera", "Screenshot captured", buffer);
+    }
+    fsemu_screenshot.no_hud = false;
 
     fsemu_screenshot.capture = false;
     free(fsemu_screenshot.time_str);
     fsemu_screenshot.time_str = NULL;
     fsemu_screenshot_unlock();
+}
+
+// ----------------------------------------------------------------------
+
+void fsemu_screenshot_store_last_frame(fsemu_video_frame_t *frame)
+{
+    if (!fsemu_screenshot.initialized) {
+        return;
+    }
+    if (frame == NULL || frame->buffer == NULL || frame->dummy) {
+        return;
+    }
+    int stride = frame->stride > 0 ? frame->stride
+                                   : frame->width * frame->depth / 8;
+    size_t need = (size_t) stride * frame->height;
+    if (need == 0) {
+        return;
+    }
+    fsemu_screenshot_lock();
+    if (need > fsemu_screenshot.snap_size) {
+        free(fsemu_screenshot.snap_buffer);
+        fsemu_screenshot.snap_buffer = (uint8_t *) malloc(need);
+        fsemu_screenshot.snap_size =
+            fsemu_screenshot.snap_buffer ? need : 0;
+    }
+    if (fsemu_screenshot.snap_buffer) {
+        memcpy(fsemu_screenshot.snap_buffer, frame->buffer, need);
+        fsemu_screenshot.snap_width = frame->width;
+        fsemu_screenshot.snap_height = frame->height;
+        fsemu_screenshot.snap_depth = frame->depth;
+        fsemu_screenshot.snap_stride = stride;
+    }
+    fsemu_screenshot_unlock();
+}
+
+void fsemu_screenshot_capture_now(void)
+{
+    if (!fsemu_screenshot.initialized) {
+        return;
+    }
+    // Set up the timestamp / capture flag exactly like a scheduled capture.
+    fsemu_screenshot_capture();
+
+    fsemu_screenshot_lock();
+    if (fsemu_screenshot.snap_buffer == NULL) {
+        fsemu_screenshot_unlock();
+        fsemu_screenshot_log("capture_now: no frame snapshot available yet\n");
+        return;
+    }
+    fsemu_video_frame_t tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.buffer = fsemu_screenshot.snap_buffer;
+    tmp.width = fsemu_screenshot.snap_width;
+    tmp.height = fsemu_screenshot.snap_height;
+    tmp.depth = fsemu_screenshot.snap_depth;
+    tmp.stride = fsemu_screenshot.snap_stride;
+    tmp.partial = 0;
+    fsemu_screenshot_unlock();
+
+    // capture_video_frame() locks internally, writes the PNG, and clears the
+    // capture flag + time_str. It operates on our snapshot copy, so it is safe
+    // to call from the gdb-stub thread while the CPU is halted. Suppress the HUD
+    // overlay so the harness capture never draws "Screenshot captured" into the
+    // frame (which would pollute subsequent captures).
+    fsemu_screenshot.no_hud = true;
+    fsemu_screenshot_capture_video_frame(&tmp);
 }
 
 // ----------------------------------------------------------------------

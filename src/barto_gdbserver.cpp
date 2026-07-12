@@ -725,15 +725,15 @@ namespace barto_gdbserver {
 										barto_debug_resources_count = 0;
 										response += "OK";
 									} else if(cmd == "screenshot") {
-										// "monitor screenshot" — schedule a capture of the current
-										// (halted) frame. fsemu_screenshot_capture() sets a flag the
-										// video thread picks up on the next render and writes a PNG to
-										// the screenshots dir. While the CPU is halted for gdb the
-										// video thread still re-renders the last emulated frame, so
-										// this captures the frozen game screen. Added for the SWOS gdb
-										// harness so it can grab the fully-composited AGA frame
+										// "monitor screenshot" — capture the current (halted) frame
+										// IMMEDIATELY. fsemu_screenshot_capture_now() saves the last
+										// composited frame synchronously from a retained snapshot, so
+										// the PNG is written to the screenshots dir before we reply OK
+										// — no need to resume the emulator for the video thread to pick
+										// up a deferred flag. Grabs the fully-composited AGA frame
 										// (including hardware sprites, which a bitplane read misses).
-										fsemu_screenshot_capture();
+										// Added for the SWOS gdb harness.
+										fsemu_screenshot_capture_now();
 										response += "OK";
 									} else {
 										// unknown monitor command

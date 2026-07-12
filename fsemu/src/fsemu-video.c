@@ -459,6 +459,9 @@ fsemu_video_frame_t *fsemu_video_get_frame(int timeout_us)
     }
 #endif
     if (frame->partial == 0 || frame->partial == frame->height) {
+        // Keep a snapshot of every complete composited frame so the gdb stub can
+        // capture the current frame synchronously while the CPU is halted.
+        fsemu_screenshot_store_last_frame(frame);
         if (fsemu_screenshot_should_capture()) {
             fsemu_screenshot_capture_video_frame(frame);
         }

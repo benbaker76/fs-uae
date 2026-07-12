@@ -26,6 +26,13 @@ const char *fsemu_screenshot_path_for_type(const char *type);
 
 void fsemu_screenshot_capture_video_frame(fsemu_video_frame_t *frame);
 
+// SWOS gdb harness: retain a copy of the last composited frame, and capture the
+// current (halted) frame synchronously to a PNG from that snapshot — so a
+// screenshot can be taken while the CPU is halted for gdb without resuming the
+// emulator to let the video thread pick up the deferred capture flag.
+void fsemu_screenshot_store_last_frame(fsemu_video_frame_t *frame);
+void fsemu_screenshot_capture_now(void);
+
 #ifdef FSEMU_INTERNAL
 
 // ----------------------------------------------------------------------------
