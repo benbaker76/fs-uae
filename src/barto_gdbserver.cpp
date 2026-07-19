@@ -557,11 +557,21 @@ namespace barto_gdbserver {
 				}
 				if(!request.empty() && request[0] == 0x03) {
 					// Ctrl+C
-					ack = "+";
-					response = "$";
-					response += "S05"; // SIGTRAP
-					debugger_state = state::debugging;
-					activate_debugger();
+					if(debugger_state == state::profile || debugger_state == state::profiling) {
+						// BARTO fix: a profile owns the target until it finishes (it re-enters
+						// the debugger itself on completion). An interrupt that arrives mid-profile
+						// — e.g. the all-stop client interrupting the target it thinks should be
+						// stopped after the `monitor profile` qRcmd — otherwise freezes the async
+						// profile before the frame(s) complete (the stall seen right after a fresh
+						// boot, when the first profiled frame is slow). Swallow it and keep running.
+						request = request.substr(1);
+					} else {
+						ack = "+";
+						response = "$";
+						response += "S05"; // SIGTRAP
+						debugger_state = state::debugging;
+						activate_debugger();
+					}
 				} else if(!request.empty() && request[0] == '$') {
 					ack = "-";
 					auto end = request.find('#');
@@ -701,7 +711,7 @@ namespace barto_gdbserver {
 												s.clear();
 											}
 										} else {
-											profile_outname = s.substr(1);
+											profile_outname = s;   // fix: space already skipped above; substr(1) dropped the path's first char (e.g. the leading '/')
 										}
 
 										profile_unwind.reset();
@@ -1141,7 +1151,6 @@ start_profile:
 			start_cpu_profiler(baseText, baseText + sizeText, profile_unwind.get());
 			debug_dma = 1;
 			profile_start_cycles = static_cast<uae_u32>(get_cycles() / cpucycleunit);
-			//barto_log("GDBSERVER: Start CPU Profiler @ %u cycles\n", get_cycles() / cpucycleunit);
 			debugger_state = state::profiling;
 		} else if(debugger_state == state::profiling) {
 			profile_frame_count++;
